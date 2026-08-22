@@ -1,0 +1,21 @@
+# Python virtualenv (recreated by ./setup.sh)
+venv/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Native mic helper — compiled from native/voicerecorder.m by ./setup.sh
+bin/voicerecorder
+*.dSYM/
+
+# Recording sessions, if anyone points BASE_DIR inside the repo
+sessions/
+reviews/
+*.mov
+*.wav
+ffmpeg.log
+
+# macOS
+.DS_Store
