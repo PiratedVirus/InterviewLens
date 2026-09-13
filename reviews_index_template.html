@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>All Reviews</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e8eaed;
+    --text-dim: #9aa2b1;
+    --accent: #5b8cff;
+    --good: #38c172;
+    --warn: #f2b134;
+    --bad: #e0546a;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); padding-bottom: 60px; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 22px; }
+  input#search {
+    width: 100%; padding: 10px 14px; margin-bottom: 20px; font-size: 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+  }
+  input#search::placeholder { color: var(--text-dim); }
+  .list { display: flex; flex-direction: column; gap: 12px; }
+  .row {
+    display: block; text-decoration: none; color: var(--text);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; transition: border-color 0.15s;
+  }
+  .row:hover { border-color: var(--accent); }
+  .row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .row-title { font-weight: 650; font-size: 15px; }
+  .row-date { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+  .row-verdict { color: var(--text-dim); font-size: 13px; margin-top: 6px; }
+  .row-bottom { display: flex; gap: 14px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+  .chip {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 600;
+  }
+  .chip-strong_no, .chip-no { background: rgba(224,84,106,0.15); color: var(--bad); }
+  .chip-borderline { background: rgba(242,177,52,0.15); color: var(--warn); }
+  .chip-yes, .chip-strong_yes { background: rgba(56,193,114,0.15); color: var(--good); }
+  .mini-score { font-size: 11px; color: var(--text-dim); }
+  .mini-score b { color: var(--text); }
+  .empty { color: var(--text-dim); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>All Reviews</h1>
+  <div class="sub" id="count-sub"></div>
+  <input id="search" type="text" placeholder="Filter by problem name…">
+  <div class="list" id="list"></div>
+</div>
+
+<script id="reviews-data" type="application/json">
+/*__REVIEWS_DATA__*/
+</script>
+
+<script>
+(function () {
+  const REVIEWS = JSON.parse(document.getElementById('reviews-data').textContent);
+  const list = document.getElementById('list');
+  const search = document.getElementById('search');
+  const countSub = document.getElementById('count-sub');
+
+  const badgeLabel = {
+    strong_no: 'Strong No', no: 'No Hire', borderline: 'Borderline',
+    yes: 'Hire', strong_yes: 'Strong Hire',
+  };
+
+  function render(filterText) {
+    list.innerHTML = '';
+    const f = (filterText || '').trim().toLowerCase();
+    const filtered = REVIEWS.filter(r => !f || (r.title || '').toLowerCase().includes(f));
+    countSub.textContent = filtered.length + ' of ' + REVIEWS.length + ' review' + (REVIEWS.length === 1 ? '' : 's');
+
+    if (!filtered.length) {
+      list.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'No reviews match.' }));
+      return;
+    }
+
+    filtered.forEach(r => {
+      const a = document.createElement('a');
+      a.className = 'row';
+      a.href = r.href;
+
+      const top = document.createElement('div');
+      top.className = 'row-top';
+      const title = document.createElement('div');
+      title.className = 'row-title';
+      title.textContent = r.title;
+      const date = document.createElement('div');
+      date.className = 'row-date';
+      date.textContent = r.date || '';
+      top.appendChild(title); top.appendChild(date);
+
+      const verdict = document.createElement('div');
+      verdict.className = 'row-verdict';
+      verdict.textContent = r.verdict || '';
+
+      const bottom = document.createElement('div');
+      bottom.className = 'row-bottom';
+      if (r.hire_signal) {
+        const chip = document.createElement('span');
+        chip.className = 'chip chip-' + r.hire_signal;
+        chip.textContent = badgeLabel[r.hire_signal] || r.hire_signal;
+        bottom.appendChild(chip);
+      }
+      const s = r.scores || {};
+      const avg = ['explanation_quality', 'speaking_efficiency', 'coding_style', 'correctness']
+        .map(k => s[k]).filter(v => typeof v === 'number');
+      if (avg.length) {
+        const mean = (avg.reduce((a, b) => a + b, 0) / avg.length).toFixed(1);
+        const ms = document.createElement('span');
+        ms.className = 'mini-score';
+        ms.innerHTML = 'avg <b>' + mean + '/10</b>';
+        bottom.appendChild(ms);
+      }
+
+      a.appendChild(top);
+      if (r.verdict) a.appendChild(verdict);
+      a.appendChild(bottom);
+      list.appendChild(a);
+    });
+  }
+
+  search.addEventListener('input', () => render(search.value));
+  render('');
+})();
+</script>
+</body>
+</html>

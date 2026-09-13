@@ -46,13 +46,18 @@ Three files, single linear pipeline, no classes/abstractions beyond the one `rum
   (start via `Popen`, stop by sending `q` on stdin like pressing it in a terminal) and the native
   mic helper alongside it, plus the timer-driven menu-bar icon states. On stop, runs
   `pipeline.process_session()` on a background thread (so the menu stays responsive) and opens the
-  resulting `review.md`.
+  resulting `review.html`.
 - **`pipeline.py`** — the actual processing pipeline, called with a session directory and run
   synchronously, in order: `prepare_audio` → `transcribe_audio` (Whisper) → `extract_frames` →
   `ocr_frames` (Tesseract) → `mux_clean_audio` → build `review_prompt.md` from
   `REVIEW_PROMPT_TEMPLATE` →
-  `run_claude_code_review` (shells out to `claude --print`, cwd'd into the session folder).
+  `run_claude_code_review` (shells out to `claude --print`, cwd'd into the session folder, writes
+  `review_data.json`) → `render_review_html()` (fills `review_template.html` with that JSON).
   `BASE_DIR = ~/DSAInterviewPrep` is defined here and imported by `menubar_app.py`.
+- **`review_template.html`** — the static HTML/CSS/JS shell for the rendered review. No build step,
+  no external assets (safe to open via `file://`): `render_review_html()` just string-replaces a
+  `/*__REVIEW_DATA__*/` placeholder with the JSON and writes the result. Edit this file, not Python
+  string-building, if the user wants the report's layout/visuals changed.
 - **`config.py`** — all user-tunable knobs in one place: device *names* (see below), Whisper model
   size, frame-capture interval/limit, native-capture toggle, and the Claude CLI
   path/timeout/skip-permissions flag.
@@ -96,9 +101,14 @@ Every recording creates `~/DSAInterviewPrep/sessions/<timestamp>/`, and all pipe
 files within that one folder: `recording.mov` (video-only while recording) + `mic.wav` → `audio.wav`
 (deleted after transcription) + `transcript.txt`, `frame_*_at_MM-SS.png` → `code_ocr.txt`, then `review_prompt.md` (the full prompt, with
 transcript and OCR text embedded inline) is fed to `claude --print`, which is instructed by the
-prompt itself to write `review.md` back into that same folder. `run_claude_code_review` also
-writes `review.md` from captured stdout as a fallback, since different Claude Code CLI versions
-vary in whether `--print` writes files directly.
+prompt itself to write a single structured `review_data.json` back into that same folder (schema is
+spelled out in `REVIEW_PROMPT_TEMPLATE`). `run_claude_code_review` also extracts a JSON object from
+captured stdout as a fallback, since different Claude Code CLI versions vary in whether `--print`
+writes files directly. `process_session` then loads that JSON and calls `render_review_html()`,
+which substitutes it into `review_template.html` (a static, dependency-free template checked into
+the repo — inline SVG score rings, a silence/key-moment timeline, and collapsible per-category
+sections) to produce the human-facing `review.html`. The JSON is the data contract; the HTML is
+just a render of it — never write prose analysis straight into `review.html`.
 
 ### Resumability and progress
 
@@ -106,7 +116,7 @@ vary in whether `--print` writes files directly.
 (`transcript.txt` short-circuits audio prep + mux + Whisper; `code_ocr.txt` short-circuits frame
 extraction + OCR). This exists because the Claude review is the most likely step to fail — it
 timed out at the 240s default on a 22-minute session, after Whisper had already done the slow
-work. `unprocessed_sessions()` finds folders with a `recording.mov` but no non-empty `review.md`.
+work. `unprocessed_sessions()` finds folders with a `recording.mov` but no non-empty `review.html`.
 
 The `progress` callback is `(step_index, total, label)` over `PHASES`, and is invoked **from the
 pipeline thread**. `menubar_app` only records it into `self._progress`; a `rumps.Timer` renders it
@@ -119,15 +129,24 @@ retitling breaks key lookup.
 
 ### Review filing
 
-`publish_review()` copies each finished review to
-`~/DSAInterviewPrep/reviews/review-<slug>-<session-timestamp>.md`. The slug comes from a
-`<!-- question-slug: NAME -->` marker the review prompt asks Claude to emit; `question_slug()`
-scans the first 10 lines (not just line 1 — Claude sometimes prefixes a preamble when it can't
-write the file directly) and falls back to `unknown`. `_sanitize_slug()` strips it to
-`[a-z0-9-]`, so a malformed or path-like slug can't escape the reviews directory. `strip_preamble()`
-removes anything above the marker, which is how the apology text gets discarded when Claude Code
-can't write the file itself and the stdout fallback saves it instead. The session
-folder keeps the authoritative `review.md`; reviews/ is a flat index.
+`publish_review()` writes each finished review to
+`~/DSAInterviewPrep/reviews/review-<slug>-<session-timestamp>.{html,json}`. The slug comes from the
+`slug` field in `review_data.json`; `_sanitize_slug()` strips it to `[a-z0-9-]`, so a malformed or
+path-like slug can't escape the reviews directory, and falls back to `unknown`. The session folder
+keeps a copy of `review.html` too (and the `review_data.json` it was rendered from).
+
+Every `review.html` (both the session and reviews/ copies) carries an in-page nav bar — "All
+Reviews" plus prev/next links to the chronologically adjacent review — so browsing past sessions
+never requires Finder. `_published_reviews()` lists all `review-*.json` in reviews/, sorted by the
+`YYYY-MM-DD_HH-MM-SS` timestamp embedded in the filename (`_review_sort_key()` extracts it via
+regex — sorting the filenames themselves would sort by slug prefix first, which is wrong).
+`_nav_for()` builds the `{index_uri, prev, next}` dict from that ordering; all three hrefs are
+absolute `file://` URIs (via `Path.as_uri()`) since the two copies of a review live in different
+directories and need to resolve either way — there's no HTTP server here. Publishing a new review
+also **backfills** the previously-newest review's `next` link (re-rendering just that one file) so
+the chain doesn't dead-end, and regenerates `reviews/index.html` (from `reviews_index_template.html`)
+as the full browsable/filterable list. If you touch the nav or index logic, keep `render_review_html()`
+and `render_reviews_index()` as pure functions of their JSON inputs — they're re-run on every publish.
 
 ### Everything the review sees is timestamped
 

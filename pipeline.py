@@ -1,14 +1,16 @@
 """
 Processing pipeline: video/audio -> transcript (Whisper, local) + code OCR
 (Tesseract, local) -> a review_prompt.md -> fed straight into the Claude
-Code CLI, which writes its judged review back as review.md in the same
-session folder.
+Code CLI, which writes its judged review as review_data.json, rendered into
+a rich review.html report (via review_template.html) in the same session
+folder.
 
 Nothing here calls any paid API. Whisper and Tesseract both run on-device.
 Claude Code CLI runs on your existing Claude subscription (Pro/Max/Team),
 same as Claude Desktop — no separate API billing.
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -76,32 +78,69 @@ from the last blocks, and use the earlier ones to see how the code evolved)
 
 ## Output format
 
-Give a score out of 10 for each of the 4 categories above, then:
-- **Top 3 things to fix immediately** (most interview-costly issues first)
-- **What was actually good** (be honest, don't pad if nothing stands out)
-- **One rewritten version of a key explanation** — take the weakest verbal \
-explanation moment from the transcript and show how a strong candidate would \
-have said it instead
+Be direct. Treat this like a real debrief after a rejected interview loop,
+not a pep talk. Cite `[MM:SS]` timestamps whenever you reference a specific
+moment, so each point can be checked against the recording.
 
-Cite `[MM:SS]` timestamps whenever you reference a specific moment, so each \
-point can be checked against the recording.
+**Write your full review as a single JSON object to a file named \
+`review_data.json` in this same folder ({session_dir}).** Don't print it in \
+chat — save it as that file so it becomes a permanent record. It gets \
+rendered into a rich HTML report by a template, so the JSON is the only \
+output that matters. Output *only* the JSON object in that file — no \
+markdown fences, no commentary.
 
-Be direct. Treat this like a real debrief after a rejected interview loop, \
-not a pep talk.
+Match this exact schema:
 
-**Write your full review to a file named `review.md` in this same folder \
-({session_dir}).** Don't just print it in chat — save it as that file so it \
-becomes a permanent record I can look back on across sessions.
+```json
+{{
+  "slug": "kebab-case-problem-name, e.g. two-sum, lru-cache, merge-k-sorted-lists (use \\"unknown\\" if you can't tell)",
+  "title": "Human-readable problem name, e.g. \\"Two Sum (LeetCode 1)\\"",
+  "session_length_sec": 1059,
+  "session_length_label": "17:39",
+  "hire_signal": "one of: strong_no, no, borderline, yes, strong_yes",
+  "verdict": "one blunt sentence — the single most important takeaway, readable at a glance",
+  "scores": {{
+    "explanation_quality": 0,
+    "speaking_efficiency": 0,
+    "coding_style": 0,
+    "correctness": 0
+  }},
+  "top_fixes": [
+    {{"headline": "short imperative headline", "detail": "1-3 sentences, cite [MM:SS] timestamps"}}
+  ],
+  "what_was_good": ["short bullet, honest — omit entirely if nothing stands out"],
+  "key_moments": [
+    {{"time_sec": 257, "label": "short label e.g. 'bug introduced'", "type": "one of: bug, good, info"}}
+  ],
+  "silences": [
+    {{"start_sec": 737, "end_sec": 850}}
+  ],
+  "sections": {{
+    "explanation_quality": {{"score": 0, "body_html": "1-3 short paragraphs of analysis, may use <p>, <strong>, <em>, <code>, <ul><li> only — cite [MM:SS] timestamps"}},
+    "speaking_efficiency": {{"score": 0, "body_html": "..."}},
+    "coding_style": {{"score": 0, "body_html": "..."}},
+    "correctness": {{"score": 0, "body_html": "..."}}
+  }},
+  "final_code": {{"language": "e.g. cpp, python", "code": "the final submitted code, verbatim from the last OCR block", "frame_time": "MM:SS it was captured at"}},
+  "rewritten_explanation": {{
+    "weak_moment_time": "MM:SS",
+    "original": "the actual weak/rambling thing they said, quoted from the transcript",
+    "better": "how a strong candidate would have said the same thing"
+  }}
+}}
+```
 
-**The very first line of `review.md` must be exactly:**
-
-    <!-- question-slug: NAME -->
-
-where `NAME` is the problem being solved, in lowercase kebab-case — e.g. \
-`two-sum`, `lru-cache`, `merge-k-sorted-lists`. Use `unknown` if you \
-genuinely can't tell what problem it was. It's an HTML comment so it stays \
-invisible when the markdown is rendered; it's used to file this review by \
-problem name.
+Notes on filling it in:
+- `silences` should list every gap over ~15s between transcript lines (this \
+drives the timeline chart) — compute these from the actual `[MM:SS]` gaps, \
+don't estimate.
+- `key_moments` should mark the first line of code, where a bug was \
+introduced/found, and any other moment worth flagging on the timeline (3-6 \
+entries is plenty).
+- `body_html` fields are inserted directly into the page — keep them to the \
+listed tags only, no `<script>`/`<style>`, and escape any literal `<`/`>` \
+that isn't one of those tags.
+- All 4 scores are 0-10 integers and should match the `sections` scores.
 
 ---
 
@@ -225,7 +264,9 @@ def transcribe_audio(audio_path: Path, out_txt: Path):
     from config import WHISPER_MODEL
 
     model = whisper.load_model(WHISPER_MODEL)
-    result = model.transcribe(str(audio_path))
+    # This always runs on CPU (no CUDA on macOS); fp16=True is Whisper's
+    # default and silently falls back with a warning every single run.
+    result = model.transcribe(str(audio_path), fp16=False)
 
     lines = [
         f"[{_fmt_clock(seg['start'])}] {seg['text'].strip()}"
@@ -319,8 +360,8 @@ def ocr_frames(frames, out_txt: Path):
 
 def run_claude_code_review(session_dir: Path, prompt_path: Path) -> Path:
     """Feeds the prompt to Claude Code CLI non-interactively. Claude Code
-    itself writes review.md into session_dir (instructed to do so in the
-    prompt). Returns the expected path to review.md.
+    itself writes review_data.json into session_dir (instructed to do so in
+    the prompt). Returns the expected path to review_data.json.
 
     Raises subprocess.TimeoutExpired or subprocess.CalledProcessError on
     failure — caller should catch and surface these to the user rather than
@@ -332,7 +373,7 @@ def run_claude_code_review(session_dir: Path, prompt_path: Path) -> Path:
         CLAUDE_CLI_TIMEOUT_SECONDS,
     )
 
-    review_path = session_dir / "review.md"
+    data_path = session_dir / "review_data.json"
     prompt_text = prompt_path.read_text()
 
     cmd = [CLAUDE_CLI_PATH, "--print", prompt_text]
@@ -352,38 +393,37 @@ def run_claude_code_review(session_dir: Path, prompt_path: Path) -> Path:
 
     # Some Claude Code CLI versions print the response to stdout rather than
     # writing the file directly, even when told to. Belt-and-suspenders: if
-    # review.md wasn't created but we got stdout back, write it ourselves.
-    if not review_path.exists() and result.stdout.strip():
-        review_path.write_text(strip_preamble(result.stdout.strip()))
+    # review_data.json wasn't created but we got stdout back, pull the JSON
+    # object out of it ourselves.
+    if not data_path.exists() and result.stdout.strip():
+        extracted = _extract_json_object(result.stdout.strip())
+        if extracted:
+            data_path.write_text(extracted)
 
-    if result.returncode != 0 and not review_path.exists():
+    if result.returncode != 0 and not data_path.exists():
         raise RuntimeError(
             f"Claude Code CLI failed (exit {result.returncode}): {result.stderr[:500]}"
         )
 
-    return review_path
+    return data_path
 
 
-_SLUG_LINE = re.compile(r"<!--\s*question-slug:\s*(.+?)\s*-->", re.IGNORECASE)
+def _extract_json_object(text: str) -> str:
+    """Pull the first top-level {...} object out of Claude's stdout.
 
-
-def strip_preamble(text: str) -> str:
-    """Drop anything before the question-slug marker.
-
-    When Claude Code can't write review.md itself (the default
-    CLAUDE_CLI_SKIP_PERMISSIONS = False blocks the write), it prints the
-    review to stdout with an apology on top, and we save that. The marker is
-    specified to be the first line, so everything above it is noise. Leaves
-    the text alone if there's no marker, rather than guessing.
+    Used when Claude prints the JSON (possibly wrapped in markdown fences or
+    an apology) instead of writing review_data.json directly.
     """
-    match = _SLUG_LINE.search(text)
-    if not match:
-        return text
-    # Only trim a short preamble; a marker found deep in the file is more
-    # likely quoted content than a stray prefix.
-    if text[:match.start()].count("\n") > 20:
-        return text
-    return text[match.start():].lstrip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    candidate = text[start:end + 1]
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError:
+        return ""
+    return candidate
 
 
 def _sanitize_slug(raw: str) -> str:
@@ -392,37 +432,133 @@ def _sanitize_slug(raw: str) -> str:
     return slug[:60] or "unknown"
 
 
-def question_slug(review_text: str) -> str:
-    """Pull the problem name out of the review's marker comment.
+def render_review_html(review_data: dict, out_path: Path, nav=None) -> Path:
+    """Render review_data.json into a self-contained HTML report using
+    review_template.html, embedding the data inline so the file opens
+    standalone (no server, no network) straight from the filesystem.
 
-    Claude is asked to put it on line 1, but only the first few lines are
-    searched in case it adds a heading first. Falls back to 'unknown' rather
-    than failing the session over a naming detail.
+    `nav`, if given, is a dict of {index_uri, prev: {uri,title}|None,
+    next: {uri,title}|None} rendered as an in-page nav bar (see
+    _nav_for()). Hrefs are absolute file:// URIs, since this page can live
+    in either the session folder or reviews/ and both need to resolve.
     """
-    head = "\n".join(review_text.splitlines()[:10])
-    match = _SLUG_LINE.search(head)
-    return _sanitize_slug(match.group(1)) if match else "unknown"
+    template_path = Path(__file__).parent / "review_template.html"
+    template = template_path.read_text()
+    payload = dict(review_data)
+    if nav:
+        payload["_nav"] = nav
+    data_json = json.dumps(payload, indent=2)
+    html = template.replace("/*__REVIEW_DATA__*/", data_json)
+    out_path.write_text(html)
+    return out_path
 
 
-def publish_review(session_dir: Path, review_path: Path):
-    """Copy the review into ~/DSAInterviewPrep/reviews/ named by problem.
+_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
 
-    The session folder keeps the authoritative copy alongside the video and
-    transcript; this is a flat, greppable index by question name. Returns the
-    published path, or None if there was nothing to publish.
+
+def _review_sort_key(path: Path) -> str:
+    """Sort published reviews by the session timestamp in their filename
+    (`review-<slug>-<timestamp>.json`), not by the slug prefix, so reviews of
+    different problems still land in chronological order.
     """
-    if not review_path.exists():
-        return None
+    match = _TS_RE.search(path.stem)
+    return match.group(0) if match else path.stem
 
-    text = review_path.read_text(errors="replace")
-    slug = question_slug(text)
 
+def _published_reviews():
+    """All published review JSON files in REVIEWS_DIR, oldest first."""
+    return sorted(REVIEWS_DIR.glob("review-*.json"), key=_review_sort_key)
+
+
+def _nav_for(json_path: Path, all_jsons) -> dict:
+    """Build the {index, prev, next} nav dict for one entry in all_jsons."""
+    idx = all_jsons.index(json_path)
+    prev_path = all_jsons[idx - 1] if idx > 0 else None
+    next_path = all_jsons[idx + 1] if idx < len(all_jsons) - 1 else None
+
+    def entry(p):
+        if p is None:
+            return None
+        d = json.loads(p.read_text())
+        return {
+            "uri": p.with_suffix(".html").resolve().as_uri(),
+            "title": d.get("title") or d.get("slug") or "Review",
+        }
+
+    return {
+        "index_uri": (REVIEWS_DIR / "index.html").resolve().as_uri(),
+        "prev": entry(prev_path),
+        "next": entry(next_path),
+    }
+
+
+def render_reviews_index(all_jsons=None) -> Path:
+    """(Re)generate reviews/index.html, the browsable list of every past
+    review, using reviews_index_template.html. Called whenever a new review
+    is published so the index never goes stale.
+    """
+    if all_jsons is None:
+        all_jsons = _published_reviews()
+
+    cards = []
+    for p in reversed(all_jsons):  # newest first
+        try:
+            d = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        match = _TS_RE.search(p.stem)
+        cards.append({
+            "title": d.get("title") or d.get("slug") or "Review",
+            "href": p.with_suffix(".html").name,
+            "date": match.group(0).replace("_", " ") if match else "",
+            "hire_signal": d.get("hire_signal"),
+            "verdict": d.get("verdict", ""),
+            "scores": d.get("scores", {}),
+        })
+
+    template_path = Path(__file__).parent / "reviews_index_template.html"
+    template = template_path.read_text()
+    html = template.replace("/*__REVIEWS_DATA__*/", json.dumps(cards, indent=2))
+    out_path = REVIEWS_DIR / "index.html"
+    out_path.write_text(html)
+    return out_path
+
+
+def publish_review(session_dir: Path, review_data: dict, slug: str, session_html_path=None):
+    """File the review under ~/DSAInterviewPrep/reviews/, named by problem,
+    and wire it into the cross-review navigation: an in-page nav bar
+    (previous/next review + a link back to the full index) on every review,
+    and a regenerated reviews/index.html listing all of them.
+
+    The session folder keeps a copy too (rendered with the same nav) so
+    review.html is fully navigable no matter which copy you open. Returns the
+    published html path.
+    """
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
     # session_dir.name is already YYYY-MM-DD_HH-MM-SS, which keeps repeat
     # attempts at the same problem from overwriting each other.
-    published = REVIEWS_DIR / f"review-{slug}-{session_dir.name}.md"
-    published.write_text(text)
-    return published
+    base = f"review-{slug}-{session_dir.name}"
+    published_html = REVIEWS_DIR / f"{base}.html"
+    published_json = REVIEWS_DIR / f"{base}.json"
+    published_json.write_text(json.dumps(review_data, indent=2))
+
+    all_jsons = _published_reviews()
+    nav = _nav_for(published_json, all_jsons)
+    render_review_html(review_data, published_html, nav=nav)
+    if session_html_path is not None:
+        render_review_html(review_data, session_html_path, nav=nav)
+
+    # Backfill the previously-newest review's "next" link now that this one
+    # exists — otherwise it would dead-end going forward until re-processed.
+    idx = all_jsons.index(published_json)
+    if idx > 0:
+        prev_json = all_jsons[idx - 1]
+        prev_data = json.loads(prev_json.read_text())
+        prev_nav = _nav_for(prev_json, all_jsons)
+        render_review_html(prev_data, prev_json.with_suffix(".html"), nav=prev_nav)
+
+    render_reviews_index(all_jsons)
+    return published_html
 
 
 # Phase labels, in order. PHASE_COUNT drives the pie-chart fraction shown in
@@ -444,7 +580,8 @@ def _nonempty(path: Path) -> bool:
 
 
 def process_session(session_dir: Path, progress=None) -> Path:
-    """Runs the pipeline for one session folder and returns review.md's path.
+    """Runs the pipeline for one session folder and returns review.html's
+    path.
 
     **Resumable.** Every step is skipped when its output already exists, so a
     session that died partway -- most commonly the Claude review timing out
@@ -460,7 +597,7 @@ def process_session(session_dir: Path, progress=None) -> Path:
     transcript_path = session_dir / "transcript.txt"
     ocr_path = session_dir / "code_ocr.txt"
     prompt_path = session_dir / "review_prompt.md"
-    review_path = session_dir / "review.md"
+    html_path = session_dir / "review.html"
 
     def report(step):
         if progress:
@@ -506,15 +643,25 @@ def process_session(session_dir: Path, progress=None) -> Path:
     )
     prompt_path.write_text(prompt)
 
-    # 7. Hand off to Claude Code CLI — it writes review.md itself
+    # 7. Hand off to Claude Code CLI — it writes review_data.json itself
     report(5)
-    review_path = run_claude_code_review(session_dir, prompt_path)
+    data_path = run_claude_code_review(session_dir, prompt_path)
 
-    # 8. File a copy under reviews/ named by the problem Claude identified
-    publish_review(session_dir, review_path)
+    if not _nonempty(data_path):
+        raise RuntimeError(
+            "Claude Code CLI did not produce review_data.json — check "
+            f"{session_dir / 'review_prompt.md'} and re-run the CLI manually."
+        )
+    review_data = json.loads(data_path.read_text())
+
+    # 8. File it under reviews/ (named by the problem Claude identified),
+    # which also renders both the session and reviews/ copies with
+    # cross-review navigation and refreshes reviews/index.html.
+    slug = _sanitize_slug(review_data.get("slug", "unknown"))
+    publish_review(session_dir, review_data, slug, session_html_path=html_path)
 
     report(6)
-    return review_path
+    return html_path
 
 
 def unprocessed_sessions(sessions_dir: Path):
@@ -525,5 +672,5 @@ def unprocessed_sessions(sessions_dir: Path):
         d for d in sessions_dir.iterdir()
         if d.is_dir()
         and (d / "recording.mov").exists()
-        and not _nonempty(d / "review.md")
+        and not _nonempty(d / "review.html")
     )

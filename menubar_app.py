@@ -5,7 +5,7 @@ DSA Interview Prep Recorder — Menu Bar App
 Click Start in the menu bar -> records screen + mic (+ system audio if configured).
 Click Stop -> transcribes audio locally (Whisper), OCRs code frames locally (Tesseract),
 writes a session folder, and runs it through the Claude Code CLI headlessly --
-no Claude Desktop or Cowork step. review.md opens automatically when it's ready.
+no Claude Desktop or Cowork step. review.html opens automatically when it's ready.
 
 Everything runs locally. No API keys. No cloud calls except the one-time Whisper
 model download (first run only).
@@ -58,6 +58,17 @@ import devices
 
 # Native mic capture helper (see native/voicerecorder.m). Built by setup.sh.
 VOICE_RECORDER = Path(__file__).parent / "bin" / "voicerecorder"
+
+# Records the live ffmpeg PID for the duration of a recording. macOS only
+# lets one process hold the screen-capture stream at a time: if this app
+# crashes or a stop hangs and ffmpeg is left running, every later recording
+# silently gets zero video frames (ScreenCaptureKit reports "connection
+# INTERRUPTED" to the *new* ffmpeg instead of erroring loudly) while audio
+# keeps recording fine via the separate native mic path -- the mismatch is
+# what makes it look like a processing bug instead of a stuck process. This
+# file survives app restarts, so start_recording can detect and kill a
+# leftover process from a previous crash before it can block a new one.
+FFMPEG_PID_FILE = BASE_DIR / ".ffmpeg.pid"
 
 
 def native_voice_capture_available():
@@ -125,6 +136,7 @@ class DSARecorderApp(rumps.App):
             "Start Recording",
             "Stop Recording",
             None,
+            "Browse All Reviews",
             "Open Reviews Folder",
             "Open Sessions Folder",
             "Show Last Review",
@@ -190,6 +202,32 @@ class DSARecorderApp(rumps.App):
             return False
         return True
 
+    @staticmethod
+    def _reap_stale_ffmpeg():
+        """Kill and clear any ffmpeg left running by a previous crashed/hung
+        instance of this app, identified via FFMPEG_PID_FILE. Safe to call
+        unconditionally at the start of every recording."""
+        if not FFMPEG_PID_FILE.exists():
+            return
+        try:
+            pid = int(FFMPEG_PID_FILE.read_text().strip())
+            # Confirm it's actually still our ffmpeg before killing -- the
+            # PID could have been reused by an unrelated process by now.
+            comm = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            if comm.endswith("ffmpeg"):
+                os.kill(pid, signal.SIGKILL)
+                notify(
+                    "DSA Recorder", "Cleaned up a stuck recording",
+                    "A previous session's ffmpeg was still running and would "
+                    "have blocked this recording's screen capture."
+                )
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+        FFMPEG_PID_FILE.unlink(missing_ok=True)
+
     def _kill_ffmpeg(self):
         if not self.ffmpeg_proc:
             return
@@ -199,6 +237,7 @@ class DSARecorderApp(rumps.App):
             self.ffmpeg_proc.kill()
         self.ffmpeg_proc = None
         self._close_ffmpeg_log()
+        FFMPEG_PID_FILE.unlink(missing_ok=True)
 
     def _close_ffmpeg_log(self):
         if getattr(self, "ffmpeg_log", None):
@@ -230,6 +269,8 @@ class DSARecorderApp(rumps.App):
         if self.recording:
             rumps.alert("Already recording.")
             return
+
+        self._reap_stale_ffmpeg()
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_dir = SESSIONS_DIR / ts
@@ -301,6 +342,8 @@ class DSARecorderApp(rumps.App):
             rumps.alert("Screen recording failed to start", detail or log_text[-400:])
             return
 
+        FFMPEG_PID_FILE.write_text(str(self.ffmpeg_proc.pid))
+
         if self.use_native_audio and not self._start_native_audio():
             # Mic helper failed -- stop the video-only ffmpeg and bail rather
             # than silently recording a session with no audio at all.
@@ -319,21 +362,21 @@ class DSARecorderApp(rumps.App):
         if not self.recording:
             return
 
-        # Gracefully stop ffmpeg (send 'q' like pressing q in terminal)
-        try:
-            self.ffmpeg_proc.communicate(input=b"q", timeout=10)
-        except Exception:
-            self.ffmpeg_proc.send_signal(signal.SIGINT)
-            self.ffmpeg_proc.wait(timeout=10)
+        # Grab the session dir and proc now, and immediately flip state so a
+        # second click (or any exception below) can't re-enter this with a
+        # half-torn-down ffmpeg_proc -- that's what previously produced a
+        # crash loop where the menu stayed stuck on "recording".
+        proc = self.ffmpeg_proc
         self.ffmpeg_proc = None
-        self._close_ffmpeg_log()
-
-        self._stop_native_audio()
-
         self.recording = False
         self._rec_timer.stop()
         self.menu["Start Recording"].set_callback(self.start_recording)
         self.menu["Stop Recording"].set_callback(None)
+
+        self._stop_ffmpeg(proc)
+        self._close_ffmpeg_log()
+        FFMPEG_PID_FILE.unlink(missing_ok=True)
+        self._stop_native_audio()
 
         # Start the real work FIRST. Anything cosmetic that raises must not be
         # able to strand a finished recording unprocessed (see notify()).
@@ -342,6 +385,31 @@ class DSARecorderApp(rumps.App):
             "DSA Recorder", "Processing...",
             "Transcribing + OCR locally, then running Claude Code review"
         )
+
+    @staticmethod
+    def _stop_ffmpeg(proc):
+        """Best-effort, never-raises shutdown: graceful quit, then SIGINT,
+        then SIGKILL. Any single stage timing out must fall through to the
+        next rather than propagate and leave the process (and app state)
+        stranded."""
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.communicate(input=b"q", timeout=10)
+            return
+        except Exception:
+            pass
+        try:
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=10)
+            return
+        except Exception:
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------
     def _begin_processing(self, session_dir):
@@ -371,7 +439,7 @@ class DSARecorderApp(rumps.App):
 
         if not review_path.exists():
             notify(
-                "DSA Recorder", "No review.md found",
+                "DSA Recorder", "No review.html found",
                 "Claude Code ran but didn't write the file. Check the session folder."
             )
             subprocess.run(["open", str(session_dir)])
@@ -379,7 +447,7 @@ class DSARecorderApp(rumps.App):
 
         notify("DSA Recorder", "Review ready", review_path.name)
 
-        # Open review.md directly in the default markdown/text editor
+        # Open review.html in the default browser
         subprocess.run(["open", str(review_path)])
 
     def _finish_processing(self, status):
@@ -415,6 +483,14 @@ class DSARecorderApp(rumps.App):
         notify("DSA Recorder", "Reprocessing", session_dir.name)
 
     # -----------------------------------------------------------------
+    @rumps.clicked("Browse All Reviews")
+    def browse_all_reviews(self, _):
+        index_path = REVIEWS_DIR / "index.html"
+        if not index_path.exists():
+            rumps.alert("No completed reviews yet.")
+            return
+        subprocess.run(["open", str(index_path)])
+
     @rumps.clicked("Open Reviews Folder")
     def open_reviews_folder(self, _):
         REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
@@ -428,11 +504,11 @@ class DSARecorderApp(rumps.App):
     def show_last_review(self, _):
         # reviews/ filenames end with the session timestamp, so a plain sort
         # puts the newest last.
-        published = sorted(REVIEWS_DIR.glob("review-*.md"))
+        published = sorted(REVIEWS_DIR.glob("review-*.html"))
         if published:
             subprocess.run(["open", str(published[-1])])
             return
-        sessions = sorted(SESSIONS_DIR.glob("*/review.md"), reverse=True)
+        sessions = sorted(SESSIONS_DIR.glob("*/review.html"), reverse=True)
         if not sessions:
             rumps.alert("No completed reviews yet.")
             return
