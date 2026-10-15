@@ -14,6 +14,7 @@ review — one click from "stop recording" to your report.
 ![Tesseract](https://img.shields.io/badge/Tesseract-OCR-5A5A5A)
 ![Claude Code](https://img.shields.io/badge/Review-Claude%20Code-D97757)
 ![No API keys](https://img.shields.io/badge/API%20keys-none-success)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 <img src="docs/demo.gif" alt="InterviewLens: recording, local processing, then the graded review" width="800">
 
@@ -223,3 +224,7 @@ grep -l "complexity" ~/DSAInterviewPrep/reviews/*
 
 Python (`rumps`), Objective-C (AudioToolbox / AVFoundation), ffmpeg,
 OpenAI Whisper, Tesseract, Claude Code CLI.
+
+## License
+
+[MIT](LICENSE) © 2026 Saurabh Kulkarni
