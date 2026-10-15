@@ -1,12 +1,56 @@
-# InterviewLens
+<div align="center">
 
-A macOS menu-bar app for mock DSA interview practice. It records your screen and
-mic while you talk through a problem, transcribes and OCRs the session locally,
-and hands it to the Claude Code CLI for a scored, rubric-based review — one click
-from "stop recording" to a saved `review.md`.
+# 🔍 InterviewLens
 
-**Scope: personal use.** This is a tool for my own interview prep, not a hardened
-product. See [Known limitations](#known-limitations).
+**Record yourself solving a coding problem. Get graded like a real interviewer would.**
+
+A macOS menu-bar app that records your screen and mic while you talk through a DSA problem,
+transcribes and OCRs the session **on your Mac**, and returns a timestamped, rubric-based
+review — one click from "stop recording" to your report.
+
+![macOS](https://img.shields.io/badge/macOS-13%2B-000?logo=apple&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Whisper](https://img.shields.io/badge/Whisper-local-412991)
+![Tesseract](https://img.shields.io/badge/Tesseract-OCR-5A5A5A)
+![Claude Code](https://img.shields.io/badge/Review-Claude%20Code-D97757)
+![No API keys](https://img.shields.io/badge/API%20keys-none-success)
+
+<img src="docs/demo.gif" alt="InterviewLens: recording, local processing, then the graded review" width="800">
+
+<sub>Demo uses a sample LRU Cache session rendered with the app's real review template.</sub>
+
+</div>
+
+## Why
+
+Solving the problem is half an interview. The other half is **talking while you solve it**:
+clarifying, stating complexity, not going silent for two minutes while you debug. LeetCode grades
+the first half. InterviewLens grades the second.
+
+| You get | Details |
+|---|---|
+| 🎯 **Four scores out of 10** | Explanation quality, speaking efficiency, coding style, correctness |
+| 🛠️ **Top three fixes** | Each one cites the `[MM:SS]` moment so you can scrub to it in the recording |
+| ⏱️ **Session timeline** | Silences, bugs introduced and found, key moments |
+| ✍️ **Rewritten explanation** | Your weakest moment, rewritten the way a strong candidate would say it |
+| 📈 **History** | Every review filed by problem name, with a browsable index to track recurring weaknesses |
+
+<p align="center"><img src="docs/review.png" alt="A rendered review: verdict, four score rings, top fixes and strengths" width="800"></p>
+
+## Quick start
+
+```bash
+git clone https://github.com/PiratedVirus/InterviewLens.git
+cd InterviewLens
+./setup.sh      # ffmpeg, tesseract, Python venv, native mic helper
+./run.sh        # a ring icon appears in the menu bar
+```
+
+Needs the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) signed in once
+(`npm install -g @anthropic-ai/claude-code && claude`). Full details in [Setup](#setup).
+
+> **Scope:** built for my own interview prep, not a hardened product. See
+> [Known limitations](#known-limitations).
 
 ---
 
